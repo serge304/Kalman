@@ -1,8 +1,1 @@
-```
-# Compiled and build artifacts
-*.o
-*.obj
-*.out
-KalmanAdaptiveTest
-KalmanTest
-```
+Nothing should be ignored based on the provided file changes. The only added file is `IMPROVEMENT_PLAN.md`, which is a markdown document and should be tracked in version control.
