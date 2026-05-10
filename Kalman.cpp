@@ -172,52 +172,83 @@ void KalmanXV::SetForXV()
           0.0, rv;
 }
 
+void KalmanXV::Predict(double dt)
+{
+    // Обновляем матрицы для нового dt
+    SetTimestep(dt);
+    
+    // Выполняем шаг прогнозирования
+    Y = F * Y + B * u;
+    P = F * P * F.transpose() + q * Q;
+    
+    // Принудительная симметризация P
+    P = base::Symmetrize(P);
+}
+
+bool KalmanXV::UpdateX(double x)
+{
+    SetForX();
+    base::VectorNd z;
+    z << x, 0.0;
+    base::HH = base::MatrixNd::Zero();
+    base::HH(0, 0) = 1.0;
+    base::RR << rx, 0.0, 0.0, 0.0;
+    base::PassVector(z);
+    return !WasLastMeasurementRejected();
+}
+
+bool KalmanXV::UpdateV(double v)
+{
+    SetForV();
+    base::VectorNd z;
+    z << 0.0, v;
+    base::HH = base::MatrixNd::Zero();
+    base::HH(1, 1) = 1.0;
+    base::RR << 0.0, 0.0, 0.0, rv;
+    base::PassVector(z);
+    return !WasLastMeasurementRejected();
+}
+
+void KalmanXV::UpdateXV(double x, double v)
+{
+    SetForXV();
+    base::PassVector(base::VectorNd(x, v));
+}
+
 void KalmanXV::PassX(double x)
 {
-  SetForX();
-  // For N=2, use PassVector with single-element measurement
-  base::VectorNd z;
-  z << x, 0.0;
-  base::HH = base::MatrixNd::Zero();
-  base::HH(0, 0) = 1.0;
-  base::RR << rx, 0.0, 0.0, 0.0;
-  base::PassVector(z);
+  Predict(base::F(0, 1)); // Используем dt из текущей матрицы F
+  UpdateX(x);
 }
 
 void KalmanXV::PassV(double v)
 {
-  SetForV();
-  // For N=2, use PassVector with single-element measurement
-  base::VectorNd z;
-  z << 0.0, v;
-  base::HH = base::MatrixNd::Zero();
-  base::HH(1, 1) = 1.0;
-  base::RR << 0.0, 0.0, 0.0, rv;
-  base::PassVector(z);
+  Predict(base::F(0, 1)); // Используем dt из текущей матрицы F
+  UpdateV(v);
 }
 
 void KalmanXV::PassXV(double x, double v)
 {
-  SetForXV();
-  base::PassVector(base::VectorNd(x, v));
+  Predict(base::F(0, 1)); // Используем dt из текущей матрицы F
+  UpdateXV(x, v);
 }
 
 void KalmanXV::PassXSmooth(double x)
 {
-    PassX(x);
-    UpdatePropagation();
+    UpdateX(x);
+    base::UpdatePropagation();
 }
 
 void KalmanXV::PassVSmooth(double v)
 {
-    PassV(v);
-    UpdatePropagation();
+    UpdateV(v);
+    base::UpdatePropagation();
 }
 
 void KalmanXV::PassXVSmooth(double x, double v)
 {
-    PassXV(x, v);
-    UpdatePropagation();
+    UpdateXV(x, v);
+    base::UpdatePropagation();
 }
 
 double KalmanXV::GetX() const
@@ -244,9 +275,13 @@ void KalmanXV::PassXBatch(const std::vector<double>& x, std::vector<double>& xk,
 {
   Reset();
 
-  // Прямой проход
+  // Прямой проход с явным прогнозированием и обновлением
   for (size_t i = 0; i < x.size(); ++i)
+  {
+    if (i > 0)
+      Predict(base::F(0, 1));
     PassXSmooth(x[i]);
+  }
 
   // Сглаживание
   GetSmoothedCurve(xk, vk);
@@ -256,9 +291,13 @@ void KalmanXV::PassVBatch(const std::vector<double>& v, std::vector<double>& xk,
 {
     Reset();
 
-    // Прямой проход
+    // Прямой проход с явным прогнозированием и обновлением
     for (size_t i = 0; i < v.size(); ++i)
+    {
+      if (i > 0)
+        Predict(base::F(0, 1));
       PassVSmooth(v[i]);
+    }
 
     // Сглаживание
     GetSmoothedCurve(xk, vk);
@@ -268,9 +307,13 @@ void KalmanXV::PassXVBatch(const std::vector<double>& x, const std::vector<doubl
 {
     Reset();
 
-    // Прямой проход
+    // Прямой проход с явным прогнозированием и обновлением
     for (size_t i = 0; i < x.size(); ++i)
+    {
+      if (i > 0)
+        Predict(base::F(0, 1));
       PassXVSmooth(x[i], v[i]);
+    }
 
     // Сглаживание
     GetSmoothedCurve(xk, vk);

@@ -37,21 +37,27 @@ public:
       regularizationEpsilon(REGULARIZATION_EPSILON),
       adaptiveNoiseEnabled(false), targetNIS(1.0),
       minQBound(1e-6), maxQBound(1e6),
-      minRBound(1e-6), maxRBound(1e6) { }
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   Kalman(double _q, double _r, double _u)
     : q(_q), rx(_r), rv(_r), u(_u), I(MatrixNd::Identity()),
       regularizationEpsilon(REGULARIZATION_EPSILON),
       adaptiveNoiseEnabled(false), targetNIS(1.0),
       minQBound(1e-6), maxQBound(1e6),
-      minRBound(1e-6), maxRBound(1e6) { }
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   Kalman(double _q, double _rx, double _rv, double _u)
     : q(_q), rx(_rx), rv(_rv), u(_u), I(MatrixNd::Identity()),
       regularizationEpsilon(REGULARIZATION_EPSILON),
       adaptiveNoiseEnabled(false), targetNIS(1.0),
       minQBound(1e-6), maxQBound(1e6),
-      minRBound(1e-6), maxRBound(1e6) { }
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   void SetU(double _u) { u = _u; }
 
@@ -108,6 +114,16 @@ public:
   double GetMaxQBound() const { return maxQBound; }
   double GetMinRBound() const { return minRBound; }
   double GetMaxRBound() const { return maxRBound; }
+  
+  /// Установить порог для gatekeeping (в единицах сигм)
+  /// Если невязка превышает threshold * sqrt(S), измерение будет отброшено
+  void SetInnovationGate(double threshold) { innovationGateThreshold = threshold; }
+  
+  /// Получить текущий порог gatekeeping
+  double GetInnovationGate() const { return innovationGateThreshold; }
+  
+  /// Проверить, проходит ли измерение через фильтр инноваций
+  bool CheckInnovationGate() const;
 
 protected:
   /// Принудительная симметризация матрицы
@@ -161,10 +177,32 @@ protected:
     // Регуляризация ковариации инноваций
     S(0, 0) += regularizationEpsilon;
     
+    // Gatekeeping: проверка невязки перед обновлением
+    // Если innovationGateThreshold <= 0, gatekeeping отключен
+    if (innovationGateThreshold > 0.0)
+    {
+      VectorNd innovation = Z - H * Y_;
+      double innovationNorm = std::sqrt(innovation.squaredNorm());
+      double gateThreshold = innovationGateThreshold * std::sqrt(S(0, 0));
+      
+      if (innovationNorm > gateThreshold)
+    {
+      // Измерение отброшено, используем только прогноз
+      Y = Y_;
+      P = P_;
+      lastInnovation = innovation;
+      lastInnovationSquaredNorm = S(0, 0);
+      lastMeasurementRejected = true;
+      return;
+    }
+    
+    lastMeasurementRejected = false;
+    }
+    
     VectorNd K = P_ * H.transpose() * SafeInverse(S);
     
     // Вычисление невязки
-    lastInnovation = Z - H * Y_;
+    lastInnovation = innovation;
     lastInnovationSquaredNorm = S(0, 0);
     
     Y = Y_ + K * lastInnovation;
@@ -195,12 +233,35 @@ protected:
     // Регуляризация ковариации инноваций
     S = S + regularizationEpsilon * MatrixNd::Identity();
     
+    // Gatekeeping: проверка невязки перед обновлением
+    // Если innovationGateThreshold <= 0, gatekeeping отключен
+    if (innovationGateThreshold > 0.0)
+    {
+      lastInnovationVector = Z - HH * Y_;
+      double innovationNorm = lastInnovationVector.norm();
+      // Для многомерного случая используем среднее квадратичное отклонение
+      double avgVariance = S.trace() / S.rows();
+      double gateThreshold = innovationGateThreshold * std::sqrt(avgVariance * S.rows());
+      
+      if (innovationNorm > gateThreshold)
+    {
+      // Измерение отброшено, используем только прогноз
+      Y = Y_;
+      P = P_;
+      lastInnovation = Scalar(innovationNorm);
+      lastInnovationSquaredNorm = avgVariance;
+      lastMeasurementRejected = true;
+      return;
+    }
+    
+    lastMeasurementRejected = false;
+    }
+    
     MatrixNd K = P_ * HH.transpose() * SafeInverse(S);
     
     // Вычисление невязки
-    lastInnovationVector = Z - HH * Y_;
-    lastInnovation = Scalar(lastInnovationVector.norm());
-    lastInnovationSquaredNorm = S.trace() / S.rows();
+    lastInnovation = Scalar(innovationNorm);
+    lastInnovationSquaredNorm = avgVariance;
     
     Y = Y_ + K * lastInnovationVector;
     
@@ -293,6 +354,10 @@ protected:
   double targetNIS;
   double minQBound, maxQBound;
   double minRBound, maxRBound;
+  
+  // Переменные для gatekeeping
+  double innovationGateThreshold;
+  bool lastMeasurementRejected;
 };
 
 /// Фильтр первого порядка
@@ -358,6 +423,22 @@ public:
   KalmanXV(double dt);
 
   void SetTimestep(double dt);
+
+  /// Явный шаг прогнозирования с указанным dt
+  /// Позволяет обрабатывать данные с переменным временным интервалом
+  void Predict(double dt);
+  
+  /// Обновление только по координате
+  bool UpdateX(double x);
+  
+  /// Обновление только по скорости
+  bool UpdateV(double v);
+  
+  /// Обновление по координате и скорости одновременно
+  void UpdateXV(double x, double v);
+  
+  /// Получить флаг, было ли последнее измерение отброшено gatekeeping'ом
+  bool WasLastMeasurementRejected() const { return lastMeasurementRejected; }
 
   void PassX(double x);
   void PassV(double v);
@@ -507,6 +588,18 @@ bool Kalman<N>::AdaptNoiseParameters()
   
   // Возвращаем true, если параметры изменились
   return (std::abs(q - oldQ) > 1e-12) || (std::abs(rx - oldRx) > 1e-12);
+}
+
+template<unsigned short N>
+bool Kalman<N>::CheckInnovationGate() const
+{
+  if (lastInnovationSquaredNorm <= 0.0)
+    return true; // Нет данных для проверки
+  
+  double currentNIS = ComputeNIS();
+  // Проверяем, находится ли NIS в допустимых пределах
+  // threshold сигм соответствует threshold^2 для NIS
+  return currentNIS < innovationGateThreshold * innovationGateThreshold;
 }
 
 } // namespace Skasp
