@@ -34,15 +34,30 @@ public:
 public:
   Kalman()
     : q(0.0), rx(0.0), rv(0.0), u(0.0), I(MatrixNd::Identity()), 
-      regularizationEpsilon(REGULARIZATION_EPSILON) { }
+      regularizationEpsilon(REGULARIZATION_EPSILON),
+      adaptiveNoiseEnabled(false), targetNIS(1.0),
+      minQBound(1e-6), maxQBound(1e6),
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   Kalman(double _q, double _r, double _u)
     : q(_q), rx(_r), rv(_r), u(_u), I(MatrixNd::Identity()),
-      regularizationEpsilon(REGULARIZATION_EPSILON) { }
+      regularizationEpsilon(REGULARIZATION_EPSILON),
+      adaptiveNoiseEnabled(false), targetNIS(1.0),
+      minQBound(1e-6), maxQBound(1e6),
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   Kalman(double _q, double _rx, double _rv, double _u)
     : q(_q), rx(_rx), rv(_rv), u(_u), I(MatrixNd::Identity()),
-      regularizationEpsilon(REGULARIZATION_EPSILON) { }
+      regularizationEpsilon(REGULARIZATION_EPSILON),
+      adaptiveNoiseEnabled(false), targetNIS(1.0),
+      minQBound(1e-6), maxQBound(1e6),
+      minRBound(1e-6), maxRBound(1e6),
+      innovationGateThreshold(0.0),
+      lastMeasurementRejected(false) { }
 
   void SetU(double _u) { u = _u; }
 
@@ -65,6 +80,50 @@ public:
   {
     return ComputeNIS() < threshold * threshold;
   }
+
+  /// Включить/выключить адаптивную настройку параметров шума
+  void EnableAdaptiveNoise(bool enable) { adaptiveNoiseEnabled = enable; }
+  
+  /// Установить целевое значение NIS для адаптивной настройки
+  void SetTargetNIS(double target) { targetNIS = target; }
+  
+  /// Получить текущее значение NIS
+  double GetCurrentNIS() const { return ComputeNIS(); }
+  
+  /// Обновить параметры q и r на основе ковариации инноваций
+  /// Использует метод адаптивной настройки на основе отношения фактической и ожидаемой ковариации инноваций
+  void UpdateNoiseParameters(double actualInnovationCovariance, double expectedInnovationCovariance);
+  
+  /// Динамически обновить q и r на основе последней инновации
+  /// Возвращает true, если параметры были обновлены
+  bool AdaptNoiseParameters();
+  
+  /// Установить границы для адаптивного изменения q
+  void SetQBounds(double minQ, double maxQ) { minQBound = minQ; maxQBound = maxQ; }
+  
+  /// Установить границы для адаптивного изменения r
+  void SetRBounds(double minR, double maxR) { minRBound = minR; maxRBound = maxR; }
+  
+  /// Получить текущие значения q и r
+  double GetCurrentQ() const { return q; }
+  double GetCurrentRx() const { return rx; }
+  double GetCurrentRv() const { return rv; }
+  
+  /// Получить границы для q и r (для тестов)
+  double GetMinQBound() const { return minQBound; }
+  double GetMaxQBound() const { return maxQBound; }
+  double GetMinRBound() const { return minRBound; }
+  double GetMaxRBound() const { return maxRBound; }
+  
+  /// Установить порог для gatekeeping (в единицах сигм)
+  /// Если невязка превышает threshold * sqrt(S), измерение будет отброшено
+  void SetInnovationGate(double threshold) { innovationGateThreshold = threshold; }
+  
+  /// Получить текущий порог gatekeeping
+  double GetInnovationGate() const { return innovationGateThreshold; }
+  
+  /// Проверить, проходит ли измерение через фильтр инноваций
+  bool CheckInnovationGate() const;
 
 protected:
   /// Принудительная симметризация матрицы
@@ -118,10 +177,32 @@ protected:
     // Регуляризация ковариации инноваций
     S(0, 0) += regularizationEpsilon;
     
+    // Gatekeeping: проверка невязки перед обновлением
+    // Если innovationGateThreshold <= 0, gatekeeping отключен
+    if (innovationGateThreshold > 0.0)
+    {
+      VectorNd innovation = Z - H * Y_;
+      double innovationNorm = std::sqrt(innovation.squaredNorm());
+      double gateThreshold = innovationGateThreshold * std::sqrt(S(0, 0));
+      
+      if (innovationNorm > gateThreshold)
+    {
+      // Измерение отброшено, используем только прогноз
+      Y = Y_;
+      P = P_;
+      lastInnovation = innovation;
+      lastInnovationSquaredNorm = S(0, 0);
+      lastMeasurementRejected = true;
+      return;
+    }
+    
+    lastMeasurementRejected = false;
+    }
+    
     VectorNd K = P_ * H.transpose() * SafeInverse(S);
     
     // Вычисление невязки
-    lastInnovation = Z - H * Y_;
+    lastInnovation = innovation;
     lastInnovationSquaredNorm = S(0, 0);
     
     Y = Y_ + K * lastInnovation;
@@ -152,12 +233,35 @@ protected:
     // Регуляризация ковариации инноваций
     S = S + regularizationEpsilon * MatrixNd::Identity();
     
+    // Gatekeeping: проверка невязки перед обновлением
+    // Если innovationGateThreshold <= 0, gatekeeping отключен
+    if (innovationGateThreshold > 0.0)
+    {
+      lastInnovationVector = Z - HH * Y_;
+      double innovationNorm = lastInnovationVector.norm();
+      // Для многомерного случая используем среднее квадратичное отклонение
+      double avgVariance = S.trace() / S.rows();
+      double gateThreshold = innovationGateThreshold * std::sqrt(avgVariance * S.rows());
+      
+      if (innovationNorm > gateThreshold)
+    {
+      // Измерение отброшено, используем только прогноз
+      Y = Y_;
+      P = P_;
+      lastInnovation = Scalar(innovationNorm);
+      lastInnovationSquaredNorm = avgVariance;
+      lastMeasurementRejected = true;
+      return;
+    }
+    
+    lastMeasurementRejected = false;
+    }
+    
     MatrixNd K = P_ * HH.transpose() * SafeInverse(S);
     
     // Вычисление невязки
-    lastInnovationVector = Z - HH * Y_;
-    lastInnovation = Scalar(lastInnovationVector.norm());
-    lastInnovationSquaredNorm = S.trace() / S.rows();
+    lastInnovation = Scalar(innovationNorm);
+    lastInnovationSquaredNorm = avgVariance;
     
     Y = Y_ + K * lastInnovationVector;
     
@@ -206,6 +310,9 @@ protected:
       
       lastInnovation = Scalar(0.0);
       lastInnovationSquaredNorm = 0.0;
+      
+      // Сброс адаптивных параметров к исходным значениям не требуется,
+      // так как они хранят границы и настройки, а не состояние
   }
 
 public:
@@ -241,6 +348,16 @@ protected:
   VectorNd lastInnovationVector;
   double lastInnovationSquaredNorm;
   double regularizationEpsilon;
+  
+  // Переменные для адаптивной настройки параметров шума
+  bool adaptiveNoiseEnabled;
+  double targetNIS;
+  double minQBound, maxQBound;
+  double minRBound, maxRBound;
+  
+  // Переменные для gatekeeping
+  double innovationGateThreshold;
+  bool lastMeasurementRejected;
 };
 
 /// Фильтр первого порядка
@@ -307,6 +424,22 @@ public:
 
   void SetTimestep(double dt);
 
+  /// Явный шаг прогнозирования с указанным dt
+  /// Позволяет обрабатывать данные с переменным временным интервалом
+  void Predict(double dt);
+  
+  /// Обновление только по координате
+  bool UpdateX(double x);
+  
+  /// Обновление только по скорости
+  bool UpdateV(double v);
+  
+  /// Обновление по координате и скорости одновременно
+  void UpdateXV(double x, double v);
+  
+  /// Получить флаг, было ли последнее измерение отброшено gatekeeping'ом
+  bool WasLastMeasurementRejected() const { return lastMeasurementRejected; }
+
   void PassX(double x);
   void PassV(double v);
   void PassXV(double x, double v);
@@ -360,6 +493,115 @@ private:
   void SetForV();
 };
 
-} // namespace Skasp { namespace Base {
+} // namespace Skasp
+
+/// Реализация методов адаптивной настройки параметров шума
+
+namespace Skasp {
+
+template<unsigned short N>
+void Kalman<N>::UpdateNoiseParameters(double actualInnovationCovariance, double expectedInnovationCovariance)
+{
+  if (expectedInnovationCovariance <= 0.0 || actualInnovationCovariance <= 0.0)
+    return;
+  
+  // Вычисляем отношение фактической ковариации к ожидаемой
+  double ratio = actualInnovationCovariance / expectedInnovationCovariance;
+  
+  // Если отношение близко к 1, параметры не требуют корректировки
+  const double tolerance = 0.1; // 10% допуск
+  if (std::abs(ratio - 1.0) < tolerance)
+    return;
+  
+  // Адаптивно обновляем q и r
+  // Если ratio > 1, то фактическая неопределенность больше ожидаемой -> увеличиваем q или r
+  // Если ratio < 1, то фактическая неопределенность меньше ожидаемой -> уменьшаем q или r
+  
+  // Коэффициент адаптации (чем больше, тем быстрее адаптация)
+  const double adaptationRate = 0.1;
+  
+  // Обновляем q (шум процесса)
+  double newQ = q * std::pow(ratio, adaptationRate);
+  newQ = std::max(minQBound, std::min(maxQBound, newQ));
+  q = newQ;
+  
+  // Обновляем r (шум измерения) - используем тот же подход
+  double newR = rx * std::pow(ratio, adaptationRate);
+  newR = std::max(minRBound, std::min(maxRBound, newR));
+  rx = newR;
+  rv = newR;
+}
+
+template<unsigned short N>
+bool Kalman<N>::AdaptNoiseParameters()
+{
+  if (!adaptiveNoiseEnabled || lastInnovationSquaredNorm <= 0.0)
+    return false;
+  
+  // Вычисляем текущее NIS
+  double currentNIS = ComputeNIS();
+  
+  // Если NIS значительно отличается от целевого значения, адаптируем параметры
+  const double nisTolerance = 0.5;
+  if (std::abs(currentNIS - targetNIS) < nisTolerance)
+    return false;
+  
+  // Определяем направление корректировки
+  // Если NIS > targetNIS, значит невязка слишком большая -> увеличиваем q или r
+  // Если NIS < targetNIS, значит фильтр слишком "уверен" -> можно уменьшить q или r
+  
+  double ratio = currentNIS / targetNIS;
+  const double adaptationRate = 0.05; // Более медленная адаптация для стабильности
+  
+  // Сохраняем старые значения для проверки изменений
+  double oldQ = q;
+  double oldRx = rx;
+  
+  // Адаптируем q (шум процесса)
+  if (ratio > 1.0)
+  {
+    // Увеличиваем q, чтобы учесть большую неопределенность в модели
+    q = q * (1.0 + adaptationRate * (ratio - 1.0));
+  }
+  else
+  {
+    // Уменьшаем q
+    q = q * (1.0 - adaptationRate * (1.0 - ratio));
+  }
+  q = std::max(minQBound, std::min(maxQBound, q));
+  
+  // Адаптируем r (шум измерения)
+  if (ratio > 1.0)
+  {
+    // Увеличиваем r, чтобы меньше доверять измерениям с большим шумом
+    rx = rx * (1.0 + adaptationRate * (ratio - 1.0));
+    rv = rv * (1.0 + adaptationRate * (ratio - 1.0));
+  }
+  else
+  {
+    // Уменьшаем r
+    rx = rx * (1.0 - adaptationRate * (1.0 - ratio));
+    rv = rv * (1.0 - adaptationRate * (1.0 - ratio));
+  }
+  rx = std::max(minRBound, std::min(maxRBound, rx));
+  rv = std::max(minRBound, std::min(maxRBound, rv));
+  
+  // Возвращаем true, если параметры изменились
+  return (std::abs(q - oldQ) > 1e-12) || (std::abs(rx - oldRx) > 1e-12);
+}
+
+template<unsigned short N>
+bool Kalman<N>::CheckInnovationGate() const
+{
+  if (lastInnovationSquaredNorm <= 0.0)
+    return true; // Нет данных для проверки
+  
+  double currentNIS = ComputeNIS();
+  // Проверяем, находится ли NIS в допустимых пределах
+  // threshold сигм соответствует threshold^2 для NIS
+  return currentNIS < innovationGateThreshold * innovationGateThreshold;
+}
+
+} // namespace Skasp
 
 #endif /* KALMAN_H_ */
