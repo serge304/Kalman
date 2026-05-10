@@ -91,7 +91,7 @@ void Kalman2d::Init(double y0, double y1, const MatrixNd& P0)
   P = P0;
 }
 
-MatrixNd Kalman2d::GetCovariance() const
+typename Kalman2d::MatrixNd Kalman2d::GetCovariance() const
 {
   return P;
 }
@@ -175,13 +175,25 @@ void KalmanXV::SetForXV()
 void KalmanXV::PassX(double x)
 {
   SetForX();
-  base::PassScalar(base::Scalar(x));
+  // For N=2, use PassVector with single-element measurement
+  base::VectorNd z;
+  z << x, 0.0;
+  base::HH = base::MatrixNd::Zero();
+  base::HH(0, 0) = 1.0;
+  base::RR << rx, 0.0, 0.0, 0.0;
+  base::PassVector(z);
 }
 
 void KalmanXV::PassV(double v)
 {
   SetForV();
-  base::PassScalar(base::Scalar(v));
+  // For N=2, use PassVector with single-element measurement
+  base::VectorNd z;
+  z << 0.0, v;
+  base::HH = base::MatrixNd::Zero();
+  base::HH(1, 1) = 1.0;
+  base::RR << 0.0, 0.0, 0.0, rv;
+  base::PassVector(z);
 }
 
 void KalmanXV::PassXV(double x, double v)
@@ -299,7 +311,13 @@ void KalmanVA::SetForV()
 void KalmanVA::PassV(double v)
 {
   SetForV();
-  base::PassScalar(base::Scalar(v));
+  // For N=2, use PassVector with single-element measurement
+  base::VectorNd z;
+  z << v, 0.0;
+  base::HH = base::MatrixNd::Zero();
+  base::HH(0, 0) = 1.0;
+  base::RR << rv, 0.0, 0.0, 0.0;
+  base::PassVector(z);
 }
 
 void KalmanVA::PassVSmooth(double v)
